@@ -18,6 +18,10 @@ app.get("/config.js", (req, res) => {
     .send(`window.APP_CONFIG = ${JSON.stringify({ AUTH_URL, COORDINATOR_WS_URL })};`);
 });
 
+app.get("/", (req, res) => {
+  res.redirect(302, "/login.html");
+});
+
 app.use(express.static(publicDirectory));
 
 const port = process.env.PORT || 3000;
