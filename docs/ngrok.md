@@ -38,33 +38,32 @@ incluyas el authtoken, secretos ni URLs públicas reales en archivos del reposit
 ## Abrir los túneles
 
 La sintaxis verificada con ngrok Agent `3.39.9-msix-stable` es `ngrok http
-[address:port]`; se puede consultar con `ngrok http --help`. Ejecuta cada comando
-en una terminal separada:
+[address:port] [--url URL]`; se puede consultar con `ngrok http --help`.
+Ejecuta cada comando en una terminal separada y asígnale un dominio distinto
+disponible en tu cuenta:
 
 ```powershell
-ngrok http 4000
-ngrok http 5000
-ngrok http 3000
+ngrok http 4000 --url https://<dominio-auth-asignado>
+ngrok http 5000 --url https://<dominio-coordinador-asignado>
+ngrok http 3000 --url https://<dominio-cliente-asignado>
 ```
 
 Asocia cada URL HTTPS publicada al servicio correspondiente:
 
 | Servicio | Puerto local | URL pública que se debe configurar |
 |---|---:|---|
-| Auth | 4000 | `https://<url-auth-asignada>` |
-| Coordinador | 5000 | `https://<url-coordinador-asignada>` |
-| Cliente | 3000 | `https://<url-cliente-asignada>` |
+| Auth | 4000 | `https://<dominio-auth-asignado>` |
+| Coordinador | 5000 | `https://<dominio-coordinador-asignado>` |
+| Cliente | 3000 | `https://<dominio-cliente-asignado>` |
 
-Las tres URLs deben ser **distintas**. Si la cuenta o el plan no permite iniciar
-tres endpoints independientes, revisa en el dashboard de ngrok qué dominios o
-endpoints están disponibles para esa cuenta. No reutilices una URL para varios
-puertos: los clientes no tendrían tres destinos inequívocos.
-
-La sintaxis verificada para iniciar endpoints definidos en un archivo de
-configuración es `ngrok start --all`. La configuración actual de ngrok usa
-versionado `3` y definiciones `endpoints`; cada endpoint necesita una URL. Usa
-esta alternativa solo después de disponer de tres URLs distintas y validar el
-archivo con `ngrok config check`. No añadas authtoken al archivo que se versiona.
+Las tres URLs deben ser **distintas**. Si la cuenta o el plan no permite
+asignar tres dominios distintos, revisa en el dashboard de ngrok los dominios
+disponibles. Según la [página oficial de planes de ngrok](https://ngrok.com/pricing),
+el plan Free incluye tres endpoints online y un dominio de desarrollo; por eso
+el límite observado puede ser de dominios, no de sesiones simultáneas. Considera
+un plan con varios dominios ngrok o dominios propios que puedas asignar a los
+endpoints. No reutilices una URL para varios puertos: los clientes no tendrían
+tres destinos inequívocos.
 
 ## Variables de entorno para URLs públicas
 
@@ -74,13 +73,13 @@ No agregues barra al final de las URLs:
 ```dotenv
 # client/.env
 PORT=3000
-AUTH_URL=https://<url-auth-asignada>
-COORDINATOR_WS_URL=wss://<url-coordinador-asignada>
+AUTH_URL=https://<dominio-auth-asignado>
+COORDINATOR_WS_URL=wss://<dominio-coordinador-asignado>
 ```
 
 ```dotenv
 # auth-service/.env
-CORS_ORIGINS=http://localhost:3000,https://<url-cliente-asignada>
+CORS_ORIGINS=http://localhost:3000,https://<dominio-cliente-asignado>
 ```
 
 `coordinator/.env` normalmente no requiere cambios: conserva `PORT` y la misma
@@ -95,9 +94,9 @@ Usa las URLs reales solo en la terminal, Thunder Client y el navegador; no las
 pegues en archivos versionados:
 
 ```powershell
-Invoke-RestMethod https://<url-auth-asignada>/health
-Invoke-RestMethod https://<url-coordinador-asignada>/health
-Invoke-WebRequest https://<url-cliente-asignada>/
+Invoke-RestMethod https://<dominio-auth-asignado>/health
+Invoke-RestMethod https://<dominio-coordinador-asignado>/health
+Invoke-WebRequest https://<dominio-cliente-asignado>/
 ```
 
 Desde la URL pública del cliente, registra un usuario, inicia sesión y confirma
@@ -108,7 +107,7 @@ pública de Auth. Para probar el endpoint WebSocket público, usa un token de
 prueba recién emitido:
 
 ```powershell
-wscat -c "wss://<url-coordinador-asignada>/connect?token=<TOKEN>"
+wscat -c "wss://<dominio-coordinador-asignado>/connect?token=<TOKEN>"
 ```
 
 No guardes ni publiques ese token.
