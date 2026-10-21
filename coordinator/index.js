@@ -1,4 +1,4 @@
-// Coordinador — Taller 4, Sistemas Distribuidos (Universidad de Boyacá)
+
 // Responsabilidad: aceptar conexiones WebSocket autenticadas con JWT, mantener
 // un Map de jugadores en línea y hacer broadcast de la lista ante cada cambio.
 // Puerto por defecto: 5000. WebSocket en /connect?token=<JWT>.
@@ -210,7 +210,7 @@ wss.on('connection', (ws, payload) => {
   // Broadcast de la lista actualizada a TODOS (incluido el nuevo)
   broadcastPlayers();
 
-  // Timer de expiración en caliente (SPEC.md §3.6)
+  // Timer de expiración en caliente
   // Al vencer el JWT mientras el socket sigue abierto, se notifica y se cierra.
   const msUntilExpiry = payload.exp * 1000 - Date.now();
   if (msUntilExpiry > 0) {
