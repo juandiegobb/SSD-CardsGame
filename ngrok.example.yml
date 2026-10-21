@@ -1,0 +1,18 @@
+﻿# ngrok.example.yml — Plantilla para levantar los 3 servicios simultáneos
+# NO agregues tu authtoken aquí. Debe permanecer configurado en tu equipo con:
+# ngrok config add-authtoken <TU_AUTHTOKEN>
+#
+# Para ejecutar los 3 túneles:
+# ngrok start --all --config ngrok.example.yml
+
+version: 2
+tunnels:
+  auth:
+    proto: http
+    addr: 4000
+  coordinator:
+    proto: http
+    addr: 5000
+  client:
+    proto: http
+    addr: 3000
