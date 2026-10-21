@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Acceso | Juego multijugador</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/config.js"></script>
+    <script src="/common.js"></script>
+</head>
+<body>
+    <main>
+        <header>
+            <h1>Juego multijugador</h1>
+            <p class="muted">Regístrate o inicia sesión para entrar al lobby.</p>
+        </header>
+
+        <p id="login-notice" class="message" role="alert"></p>
+        <p id="auth-message" class="message" role="alert" aria-live="polite"></p>
+
+        <div class="auth-forms">
+            <section>
+                <h2>Crear cuenta</h2>
+                <form id="register-form">
+                    <label for="register-username">Nombre de usuario</label>
+                    <input id="register-username" name="username" autocomplete="username" required>
+                    <label for="register-password">Contraseña</label>
+                    <input id="register-password" name="password" type="password" autocomplete="new-password" required>
+                    <button class="primary" type="submit">Registrarme</button>
+                </form>
+            </section>
+
+            <section>
+                <h2>Iniciar sesión</h2>
+                <form id="login-form">
+                    <label for="login-username">Nombre de usuario</label>
+                    <input id="login-username" name="username" autocomplete="username" required>
+                    <label for="login-password">Contraseña</label>
+                    <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+                    <button class="primary" type="submit">Entrar</button>
+                </form>
+            </section>
+        </div>
+        <p id="lobby-link" hidden><a href="/lobby.html">Ir al lobby</a></p>
+    </main>
+
+    <script>
+        const authMessage = document.getElementById("auth-message");
+        const loginNotice = document.getElementById("login-notice");
+        const genericAuthError = "No se pudo contactar al servicio de autenticación. Verifica que esté en ejecución y que AUTH_URL sea correcto.";
+
+        function showAuthMessage(message, hint = "", isError = false) {
+            authMessage.replaceChildren();
+            const messageLine = document.createElement("p");
+            messageLine.textContent = message;
+            authMessage.append(messageLine);
+            if (hint) {
+                const hintLine = document.createElement("p");
+                hintLine.textContent = `Sugerencia: ${hint}`;
+                authMessage.append(hintLine);
+            }
+            authMessage.className = `message ${isError ? "error" : "success"}`;
+        }
+
+        const notice = sessionStorage.getItem("loginNotice");
+        if (notice) {
+            loginNotice.textContent = notice;
+            loginNotice.classList.add("error");
+            sessionStorage.removeItem("loginNotice");
+        }
+        document.getElementById("lobby-link").hidden = !getToken();
+
+        document.getElementById("register-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            const result = await apiPost("/register", {
+                username: form.get("username"),
+                password: form.get("password")
+            });
+            if (!result.valid) {
+                showAuthMessage(genericAuthError, "", true);
+                return;
+            }
+            if (result.ok) {
+                showAuthMessage(result.payload.message);
+                document.getElementById("register-form").reset();
+                return;
+            }
+            showAuthMessage(result.payload.message, result.payload.hint, true);
+        });
+
+        document.getElementById("login-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            const result = await apiPost("/login", {
+                username: form.get("username"),
+                password: form.get("password")
+            });
+            if (!result.valid) {
+                showAuthMessage(genericAuthError, "", true);
+                return;
+            }
+            if (!result.ok) {
+                showAuthMessage(result.payload.message, result.payload.hint, true);
+                return;
+            }
+            if (
+                typeof result.payload.token !== "string" ||
+                typeof result.payload.username !== "string" ||
+                !result.payload.token ||
+                !result.payload.username
+            ) {
+                showAuthMessage(genericAuthError, "", true);
+                return;
+            }
+            setCredentials(result.payload.token, result.payload.username);
+            window.location.assign("/lobby.html");
+        });
+    </script>
+</body>
+</html>
