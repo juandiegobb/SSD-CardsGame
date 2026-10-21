@@ -1,145 +1,205 @@
-# Despliegue local con ngrok
+# Despliegue con ngrok — Taller 4 (Sistemas Distribuidos)
 
-Esta guía publica los tres servicios locales con tres endpoints ngrok distintos. No
-incluyas el authtoken, secretos ni URLs públicas reales en archivos del repositorio.
+Esta guía documenta el despliegue del sistema distribuido publicando los tres servicios a Internet mediante **ngrok**, cumpliendo con el requerimiento de **un túnel público independiente por cada servicio**:
+1. **Auth Service** (HTTP :4000)
+2. **Coordinador de Sesiones** (WebSocket / HTTP :5000)
+3. **Cliente Web** (HTTP :3000)
 
-## Prerrequisitos
+---
 
-- Instala ngrok para Windows desde Microsoft Store o
-  [la página oficial de descargas](https://ngrok.com/download/windows).
-- Inicia sesión en ngrok y configura el authtoken en tu equipo, sin compartirlo:
+## 1. Prerrequisitos
 
-  ```powershell
-  ngrok config add-authtoken <TU_AUTHTOKEN>
-  ngrok version
-  ngrok config check
-  ```
+1. **ngrok CLI instalado y autenticado:**
+   - Instala ngrok en Windows (vía Microsoft Store, winget o https://ngrok.com/download).
+   - Vincula tu cuenta personal con tu authtoken (este comando solo se corre una vez en tu equipo):
+     ```powershell
+     ngrok config add-authtoken <TU_AUTHTOKEN_PERSONAL>
+     ```J   > ➠ **Regla de seguridad:** NUNCA compartas ni subas tu authtoken a Git.
 
-- Instala las dependencias de cada servicio (`npm install` desde sus carpetas).
-- En `auth-service/.env` y `coordinator/.env`, configura la misma `JWT_SECRET`.
-- Arranca un servicio por terminal, desde la raíz del repositorio:
+2. **Servicios locales listos y funcionando:**
+   - Asegúrate de haber instalado dependencias con `npm install` en cada una de las tres carpetas (`auth-service/`, `coordinator/`, `client/`).
+   - Verifica que `auth-service/.env` y `coordinator/.env` compartan exactamente la misma `JWT_SECRET`.
+   - Inicia los servicios localmente en terminales separadas:
+     ```powershell
+     # Terminal 1 - Auth Service
+     npm start --prefix auth-service
 
-  ```powershell
-  npm start --prefix auth-service
-  npm start --prefix coordinator
-  npm start --prefix client
-  ```
+     # Terminal 2 - Coordinador
+     npm start --prefix coordinator
 
-- Comprueba la disponibilidad local antes de abrir túneles:
+     # Terminal 3 - Cliente Web
+     npm start --prefix client
+     ```
+   - Comprueba disponibilidad local antes de abrir túneles:
+     ```powershell
+     curl http://localhost:4000/health
+     curl http://localhost:5000/health
+     curl http://localhost:3000/
+     ```
 
-  ```powershell
-  Invoke-WebRequest http://localhost:4000/health
-  Invoke-WebRequest http://localhost:5000/health
-  Invoke-WebRequest http://localhost:3000/
-  ```
+---
 
-  La ruta `/` del cliente redirige a `/login.html`.
+## 2. Iniciar los 3 túneles independientes
 
-## Abrir los túneles
+Para evitar conflictos de tráfico en cuentas gratuitas y asegurar que cada servicio tenga su propio destino, dispones de dos métodos:
 
-La sintaxis verificada con ngrok Agent `3.39.9-msix-stable` es `ngrok http
-[address:port] [--url URL]`; se puede consultar con `ngrok http --help`.
-Ejecuta cada comando en una terminal separada y asígnale un dominio distinto
-disponible en tu cuenta:
+### Método A: Archivo de configuración (Recomendado)
+El repositorio incluye el archivo plantilla `ngrok.example.yml`. Puedes iniciar los tres túneles de forma simultánea con:
 
 ```powershell
-ngrok http 4000 --url https://<dominio-auth-asignado>
-ngrok http 5000 --url https://<dominio-coordinador-asignado>
-ngrok http 3000 --url https://<dominio-cliente-asignado>
+ngrok start --all --config ngrok.example.yml
 ```
 
-Asocia cada URL HTTPS publicada al servicio correspondiente:
+> **Contenido de `ngrok.example.yml`:**
+> ```yaml
+> version: "2"
+> tunnels:
+>   auth:
+>     proto: http
+>     addr: 4000
+>   coordinator:
+>     proto: http
+>     addr: 5000
+>   client:
+>     proto: http
+>     addr: 3000
+> ```
 
-| Servicio | Puerto local | URL pública que se debe configurar |
-|---|---:|---|
-| Auth | 4000 | `https://<dominio-auth-asignado>` |
-| Coordinador | 5000 | `https://<dominio-coordinador-asignado>` |
-| Cliente | 3000 | `https://<dominio-cliente-asignado>` |
+### Método B: Tres terminales individuales
+Si prefieres terminales separadas, ejecuta en cada una:
 
-Las tres URLs deben ser **distintas**. Si la cuenta o el plan no permite
-asignar tres dominios distintos, revisa en el dashboard de ngrok los dominios
-disponibles. Según la [página oficial de planes de ngrok](https://ngrok.com/pricing),
-el plan Free incluye tres endpoints online y un dominio de desarrollo; por eso
-el límite observado puede ser de dominios, no de sesiones simultáneas. Considera
-un plan con varios dominios ngrok o dominios propios que puedas asignar a los
-endpoints. No reutilices una URL para varios puertos: los clientes no tendrían
-tres destinos inequívocos.
+```powershell
+# Terminal A (Auth)
+ngrok http 4000
 
-## Variables de entorno para URLs públicas
+# Terminal B (Coordinador)
+ngrok http 5000
 
-Después de confirmar las tres URLs asignadas, actualiza los `.env` locales.
-No agregues barra al final de las URLs:
+k Terminal C (Cliente)
+ngrok http 3000
+```
+*(Nota: Si usas el plan gratuito, no fuerces el parámetro `--url` con el mismo dominio estático en los tres, pues ngrok enviárá el tráfico al mismo servicio. Deja que ngrok asigne URLs independientes).*
 
+---
+
+## 3. Mapeo de URLs públicas
+
+Al iniciar los túneles, ngrok mostrará en consola o en su interfaz web (http://localhost:4040) la URL `https://` asignada a cada túnel. Identifícalas y asócialas así:
+
+| Servicio | Puerto Local | Protocolo | URL Pública (Ejemplo) |
+|---|:---:|:---:|---|
+| **Auth Service** | 4000 | `https://` | `https://<url-auth>.ngrok-free.app` |
+| **Coordinador** | 5000 | `https://` / `wss://` | `https://<url-coordinador>.ngrok-free.app` |
+| **Cliente Web** | 3000 | `https://` | `https://<url-cliente>.ngrok-free.app` |
+
+---
+
+## 4. Configuración de Variables de Entorno (.env)
+
+Con las URLs públicas obtenidas, actualiza los archivos `.renv` locales correspondientes **(sin barra `/` final)**:
+
+### `client/.env`
+El cliente necesita saber a qué URLs públicas debe dirigir sus peticiones y su conexión WebSocket:
 ```dotenv
-# client/.env
 PORT=3000
-AUTH_URL=https://<dominio-auth-asignado>
-COORDINATOR_WS_URL=wss://<dominio-coordinador-asignado>
-```
+AUTH_URL=https://<url-auth>.ngrok-free.app
+COORDINATOR_WS_URL=wss://<url-coordinador>.ngrok-free.app
+``g
+> ⚡ **CRÍTICO:** `COORDINATOR_WS_URL< debe comenzar con **`wss://`** (WebS3cket Seguro), NO con `ws://`. En navegadores modernos, cargar una página por HTTPS e intentar abrir un WebSocket plano `ws://` es bloqueado por **Mixed Content** (Contenido Mixto).
 
+### `auth-service/.env`
+El Auth Service debe autorizar peticiones CORS originadas desde el dominio público del cliente:
 ```dotenv
-# auth-service/.env
-CORS_ORIGINS=http://localhost:3000,https://<dominio-cliente-asignado>
+PORT=4000
+JWT_SECRET=tu-clave-secreta-compartida
+JWT_EXPIRES_IN=1h
+BCRYPT_ROUNDS=10
+DB_PATH=users.db
+CORS_ORIGINS=http://localhost:3000,https://<url-cliente>.ngrok-free.app
 ```
 
-`coordinator/.env` normalmente no requiere cambios: conserva `PORT` y la misma
-`JWT_SECRET` que Auth. Reinicia Auth, Coordinador y Cliente para cargar sus
-respectivos `.env`. En el navegador, recarga el cliente y comprueba
-`/config.js`; el cliente debe mostrar `AUTH_URL` con `https://` y
-`COORDINATOR_WS_URL` con `wss://`.
+### `coordinator/.env`
+No requiere cambios en sus variables:
+```dotenv
+PORT=5000
+JWT_SECRET=tu-clave-secreta-compartida
+```
 
-## Pruebas públicas
+---
 
-Usa las URLs reales solo en la terminal, Thunder Client y el navegador; no las
-pegues en archivos versionados:
+## 5. Reinicio de Servicios
 
+Tras guardar los cambios en los archivos `.env`, **reinicia los tres servicios** en sus respectivas terminales para que carguen la nueva configuración en memoria.
+
+Verifica que el cliente sirva la configuración actualizada visitando en tu navegador o con curl:
 ```powershell
-Invoke-RestMethod https://<dominio-auth-asignado>/health
-Invoke-RestMethod https://<dominio-coordinador-asignado>/health
-Invoke-WebRequest https://<dominio-cliente-asignado>/
+curl https://<url-cliente>.ngrok-free.app/config.jsJ``g
+Debe devolver:
+```javascript
+window.APP_CONFIG = {
+  "AUTH_URL": "https://<url-auth>.ngrok-free.app",
+  "COORDINATOR_WS_URL": "wss://<url-coordinador>.ngrok-free.app"
+};
 ```
 
-Desde la URL pública del cliente, registra un usuario, inicia sesión y confirma
-que el lobby conecta por `wss://`. Repite la prueba con un segundo navegador o
-dispositivo y confirma que las listas se actualizan en ambos sin recargar.
-Thunder Client debe probar `POST /register` y `POST /login` contra la URL
-pública de Auth. Para probar el endpoint WebSocket público, usa un token de
-prueba recién emitido:
+---
 
-```powershell
-wscat -c "wss://<dominio-coordinador-asignado>/connect?token=<TOKEN>"
-```
+## 6. Batería de Pruebas de Aceptación (Checklist Fase 4)
 
-No guardes ni publiques ese token.
+Ejecuta estas pruebas usando exclusivamente las URLs públicas de ngrok:
 
-## Diagnóstico
+- [ ] **1. Salud de los servicios públicos:**
+  - `curl https://<url-auth>.ngrok-free.app/health` → Responde `{"ok":true, "service":"auth-service", ...}`
+  - `curl https://<url-coordinador>.ngrok-free.app/health` → Responde `{"ok":true, "service":"coordinator", ...}`
+  - `curl -I https://<url-cliente>.ngrok-free.app/` → Devuelve redirección hacia `/login.html`.
 
-- **CORS o preflight fallido:** agrega el origen HTTPS exacto del cliente a
-  `CORS_ORIGINS` en `auth-service/.env` y reinicia Auth. El middleware de Auth
-  debe permitir `Content-Type` y `ngrok-skip-browser-warning`.
-- **Mixed content o WebSocket bloqueado:** con una página HTTPS usa `https://`
-  para Auth y `wss://` para el Coordinador; no uses `http://` ni `ws://`.
-- **Intersticial de ngrok:** el cliente añade
-  `ngrok-skip-browser-warning: true` a sus peticiones HTTP.
-- **Cierre 4001 al conectar:** comprueba que Auth y Coordinador tengan la misma
-  `JWT_SECRET` y que el token no esté vencido.
-- **502 o ERR_NGROK:** confirma que el servicio local está escuchando en el
-  puerto correspondiente y que ngrok apunta a ese puerto.
-- **Una misma URL pública para varios túneles:** no configures esa URL en los
-  `.env`; revisa las asignaciones de dominios/endpoints del plan de ngrok antes
-  de continuar.
+- [ ] **2. Registro y Login desde el Cliente Público:**
+  - Abre en el navegador `https://<url-cliente>.ngrok-free.app`.
+  - Registra un nuevo usuario (ej. `jugador1`) i inicia sesión. Debe redirigir automáticamente a `/lobby.html`.
 
-## Verificación de esta fase
+- [ ] **3. Lobby WebSocket por `wss://**
+  - En `/lobby.html`, confirma que el encabezado moustra el usuario activo y el panel "Jugadores en línea" se actualiza con `jugador1`.
 
-En la ejecución local de Fase 4, los tres comandos `ngrok http 4000`,
-`ngrok http 5000` y `ngrok http 3000` iniciaron, pero cada inspector local
-reportó la misma URL pública para un upstream distinto. Se detuvieron las tres
-sesiones para no dejar una URL ambigua apuntando a servicios diferentes. Por
-esto aún no se completaron las pruebas públicas de Auth, Coordinador, lobby,
-CORS, `wscat`, ni registro/login por ngrok. Se deben repetir cuando la cuenta
-disponga de tres URLs distintas.
+- [ ] **4. Dos clientes en vivo (multidispositivo):**
+  - Abre un segundo navegador (modo incógnito) o ingresa desde un teléfono móvil conectado a datos móviles a `https://<url-cliente>.ngrok-free.app`.
+  - Inicia sesión con otro usuario (ej. `jugador2`).
+  - **Resultado:** En ambas pantallas aparece de inmediato la lista con `jugador1` y `jugador2` en tiempo real sin recargar.
 
-En el plan gratuito, las URLs asignadas pueden cambiar al reiniciar los
-túneles. Si cambian, actualiza `client/.env` y `auth-service/.env`, reinicia
-los tres servicios y vuelve a probar el flujo antes de la sustentación. Mantén
-los tres túneles activos durante la demostración.
+- [ ] **5. Consola web limpia (F12):**
+  - Abre las herramientas de desarrollador (Console y Network con F12).
+  - Confirma que no existan errores de `CORR error`, preflight fallido ni advertencias de `Mixed Content`.
+
+- [ ] **6. Rechazo de token corrupto sobre ngrok:**
+  - En DevTools ↑ Application → Local Storage, altera el valor de `token` agregándole letras aleatorias.
+  - Recarga la página: el Coordinador rechaza la conexión, el WebS3cket cierra con código `4001` y la interfaz redirige a `/login.html` mostrando el aviso de error.
+
+- [ ] **7. Verificación con herramientas externas:**
+  - **curl / Thunder Client:**
+    ```powershell
+    curl -X POST https://<url-auth>.ngrok-free.app/login -R "Content-Type: application/json" -d '{"username":"jugador1","password":"Password123"}'
+    ```
+  - **wscat:**
+    ```powershell
+    wscat -c "wss://<url-coordinador>.ngrok-free.app/connect?token=<TOKEN_JWT>"
+    ```
+
+---
+
+## 7. Diagnóstico de Incidencias Comunes
+
+| Síntoma | Causa raóz | Solución |
+|---|---|---|
+*| **CORR error en preflight (OPTIONS)** | La URL del cliente no está en `CORS_ORIGINS` del Auth Service. | Añade la URL pública exacta del cliente (con `https://`, sin barra final) a `CORS_ORIGINS` en `auth-service/.env` y reinicia el Auth Service. |
+| **Mixed Content: The page was loaded over HTTPS...** | El cliente intenta conectar a `ws://` o `http://`. | Cambia `COORDINATOR_WS_URL< en `client/.env` para que comience con **`wss://`** y reinicia el cliente. |
+| **Página intersticial de ngrok ("You are about to visit...")** | ngrok muestra una página de advertencia HTML antes de entregar JSON. | El cliente ya incluye el header `"ngrok-skip-browser-warning": "true"` en `common.js`, y el Auth Service lo tiene habilitado en su configuración de CORS. |
+| **WebSocket cierra con código 4001 enseguida** | Las claves secretas no coinciden o el token expiró. | Verifica que `JWT_SECRET` sea dhéntica en `auth-service/.env` y `coordinator/.env`. |
+| **Error 502 Bad Gateway / ERR_NGROK_3200** | El servicio local correspondiente no está corriendo. | Inicia el servicio local en el puerto indicado (4000, 5000 o 3000). |
+| **Misma URL para dos servicios diferentes** | Se ejecutaron comandos `ngrok http` reutilizando el mismo dominio estático gratuito. | Usa URLs efímeras distintas para cada puerto o levántalos juntos con `ngrok start --all --config ngrok.example.yml`. |
+
+---
+
+## 8. Consideración para la Sustentación
+
+En el plan gratuito de ngrok, **las URLs públicas cambian cada vez que se reinician los túneles**. Por lo tanto:
+1. Durante la sustentación en vivo ante el docente, mantén las tres terminales de ngrok activas sin cerrarlas.
+2. Si por alguna razón debes reiniciar los túneles, copia las nuevas URLs a `client/.env` y `auth-service/.env`, reinicia los tres servicios y realiza una prueba rápida antes de presentar.
