@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lobby | Juego multijugador</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/config.js"></script>
+    <script src="/common.js"></script>
+</head>
+<body>
+    <main>
+        <header class="actions">
+            <div>
+                <h1>Lobby</h1>
+                <p id="current-user" class="muted"></p>
+            </div>
+            <button id="logout-button" type="button">Cerrar sesión</button>
+        </header>
+
+        <p id="connection-status" class="status" aria-live="polite">Conectando con el coordinador…</p>
+        <div id="notice" class="message" role="alert" aria-live="assertive"></div>
+        <section id="replaced-panel" class="notice-panel" hidden>
+            <p>Tu sesión se abrió en otra pestaña.</p>
+            <button id="use-here-button" class="primary" type="button">Usar la sesión aquí</button>
+        </section>
+        <section aria-labelledby="players-heading">
+            <h2 id="players-heading">Jugadores en línea <span id="player-count">(0)</span></h2>
+            <ul id="players-list" class="players"></ul>
+        </section>
+    </main>
+
+    <script>
+        const token = getToken();
+        if (!token) {
+            window.location.replace("/login.html");
+        } else {
+            let intentionalClose = false;
+            let currentUserId = null;
+            let socket;
+
+            const currentUser = document.getElementById("current-user");
+            const connectionStatus = document.getElementById("connection-status");
+            const notice = document.getElementById("notice");
+            const replacedPanel = document.getElementById("replaced-panel");
+            const playersList = document.getElementById("players-list");
+            const playerCount = document.getElementById("player-count");
+
+            currentUser.textContent = `Usuario: ${localStorage.getItem("username") || "desconocido"}`;
+
+            function showNotice(message, hint = "") {
+                notice.replaceChildren();
+                const messageLine = document.createElement("p");
+                messageLine.textContent = message;
+                notice.append(messageLine);
+                if (hint) {
+                    const hintLine = document.createElement("p");
+                    hintLine.textContent = `Sugerencia: ${hint}`;
+                    notice.append(hintLine);
+                }
+                notice.classList.add("error");
+            }
+
+            function renderPlayers(players) {
+                playersList.replaceChildren();
+                playerCount.textContent = `(${players.length})`;
+                for (const player of players) {
+                    const item = document.createElement("li");
+                    item.textContent = player.username;
+                    if (
+                        (currentUserId && player.userId === currentUserId) ||
+                        (!currentUserId && player.username === localStorage.getItem("username"))
+                    ) {
+                        item.classList.add("current");
+                    }
+                    playersList.append(item);
+                }
+            }
+
+            function returnToLogin(message) {
+                clearCredentials();
+                sessionStorage.setItem("loginNotice", message);
+                window.location.replace("/login.html");
+            }
+
+            document.getElementById("logout-button").addEventListener("click", () => {
+                intentionalClose = true;
+                clearCredentials();
+                if (socket) {
+                    socket.close(1000, "logout");
+                }
+                window.location.replace("/login.html");
+            });
+
+            document.getElementById("use-here-button").addEventListener("click", () => {
+                window.location.reload();
+            });
+
+            try {
+                const { COORDINATOR_WS_URL } = getAppConfig();
+                socket = new WebSocket(
+                    `${COORDINATOR_WS_URL}/connect?token=${encodeURIComponent(token)}`
+                );
+
+                socket.addEventListener("open", () => {
+                    connectionStatus.textContent = "Conectado al coordinador.";
+                });
+
+                socket.addEventListener("message", (event) => {
+                    let msg;
+                    try {
+                        msg = JSON.parse(event.data);
+                    } catch {
+                        showNotice("El coordinador envió una respuesta que no se pudo interpretar.");
+                        return;
+                    }
+
+                    switch (msg.type) {
+                        case "connected":
+                            currentUserId = msg.userId;
+                            currentUser.textContent = `Conectado como ${msg.username}.`;
+                            connectionStatus.textContent = "Conectado al coordinador.";
+                            break;
+                        case "players_update":
+                            if (Array.isArray(msg.players)) {
+                                renderPlayers(msg.players);
+                            }
+                            break;
+                        case "error":
+                            showNotice(msg.message, msg.hint);
+                            break;
+                        case "pong":
+                            break;
+                    }
+                });
+
+                socket.addEventListener("close", (event) => {
+                    if (intentionalClose) {
+                        return;
+                    }
+                    if (event.code === 4002) {
+                        connectionStatus.textContent = "Sesión reemplazada.";
+                        showNotice("Tu sesión se abrió en otra pestaña.");
+                        replacedPanel.hidden = false;
+                        return;
+                    }
+                    if (event.code === 4001) {
+                        returnToLogin("Tu sesión no es válida o venció.");
+                        return;
+                    }
+                    if (event.code === 4003) {
+                        returnToLogin("Tu sesión expiró.");
+                        return;
+                    }
+                    returnToLogin("Se perdió la conexión con el coordinador.");
+                });
+
+                socket.addEventListener("error", () => {
+                    connectionStatus.textContent = "No fue posible mantener la conexión con el coordinador.";
+                });
+            } catch {
+                returnToLogin("No se pudo cargar la configuración del coordinador.");
+            }
+        }
+    </script>
+</body>
+</html>
