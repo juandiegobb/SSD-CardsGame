@@ -1,0 +1,319 @@
+// Servicio de Autenticación (Auth Service) - Taller 4 Sistemas Distribuidos
+// Responsabilidad: Registro, Login con JWT (1h) y persistencia en SQLite propia.
+// Puerto por defecto: 4000
+
+require('dotenv').config();
+const path = require('node:path');
+const express = require('express');
+const cors = require('cors');
+const Database = require('better-sqlite3');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+// 1. Verificación de configuración y variables de entorno críticas
+if (!process.env.JWT_SECRET) {
+  console.error('Error crítico: La variable de entorno JWT_SECRET no está definida.');
+  process.exit(1);
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
+const PORT = Number(process.env.PORT) || 4000;
+const DB_PATH = process.env.DB_PATH || 'users.db';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
+
+// BCRYPT_ROUNDS: Mínimo 10 por especificación de seguridad
+let configuredRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
+if (configuredRounds < 10) {
+  configuredRounds = 10;
+}
+const BCRYPT_ROUNDS = configuredRounds;
+
+// Hash ficticio para mitigar ataques de temporización (timing attacks) en el login
+const DUMMY_HASH = bcrypt.hashSync('dummy_password_timing_defense', BCRYPT_ROUNDS);
+
+// 2. Inicialización de la base de datos SQLite propia
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL'); // Modo WAL para mejor concurrencia
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// Sentencias preparadas para reutilización y prevención de inyección SQL
+const insertUserStmt = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)');
+const findUserByUsernameStmt = db.prepare('SELECT id, username, password_hash, created_at FROM users WHERE username = ?');
+
+// 3. Helpers únicos de respuesta según SPEC.md §3.1
+function sendOk(res, status, message, extra = {}) {
+  return res.status(status).json({
+    ok: true,
+    message,
+    ...extra
+  });
+}
+
+function sendError(res, status, code, message, hint, details = undefined) {
+  const payload = {
+    ok: false,
+    code,
+    message,
+    hint
+  };
+  if (details !== undefined) {
+    payload.details = details;
+  }
+  return res.status(status).json(payload);
+}
+
+// 4. Configuración de Express y Middlewares
+const app = express();
+
+// CORS: orígenes permitidos desde .env, con soporte para el header de ngrok y preflight OPTIONS
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Permitir peticiones sin origen (curl, Thunder Client, mobile apps)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  credentials: true
+}));
+
+// Parser de cuerpo JSON
+app.use(express.json());
+
+// 5. Endpoints de la API
+
+// GET /health - Monitoreo y estado del servicio
+app.get('/health', (req, res) => {
+  sendOk(res, 200, 'Servicio de autenticación operativo.', {
+    service: 'auth-service',
+    uptime: Math.floor(process.uptime())
+  });
+});
+
+// POST /register - Registro de nuevo usuario
+app.post('/register', async (req, res, next) => {
+  try {
+    // Validación de existencia y tipo de body
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return sendError(
+        res,
+        400,
+        'INVALID_BODY',
+        'El cuerpo de la petición es inválido o no es un objeto JSON.',
+        'Envía JSON con header Content-Type: application/json y los campos username y password.'
+      );
+    }
+
+    const { username, password } = req.body;
+
+    // Validación de username: string, 3 a 32 caracteres, alfanumérico o guion bajo
+    if (
+      typeof username !== 'string' ||
+      username.trim().length < 3 ||
+      username.trim().length > 32 ||
+      !/^[A-Za-z0-9_]+$/.test(username.trim())
+    ) {
+      return sendError(
+        res,
+        400,
+        'INVALID_USERNAME',
+        'El nombre de usuario es inválido o no cumple el formato requerido.',
+        'Usa 3–32 caracteres: letras, números o guion bajo.',
+        [{ field: 'username', problem: 'must be 3-32 characters: letters, numbers or underscore' }]
+      );
+    }
+
+    // Validación de password: string, 8 a 72 caracteres (72 = límite de bcrypt)
+    if (typeof password !== 'string' || password.length < 8 || password.length > 72) {
+      return sendError(
+        res,
+        400,
+        'INVALID_PASSWORD',
+        'La contraseña es inválida o no cumple con la longitud permitida.',
+        'Usa una contraseña de 8 a 72 caracteres.',
+        [{ field: 'password', problem: 'must be between 8 and 72 characters' }]
+      );
+    }
+
+    const cleanUsername = username.trim();
+
+    // Hashing seguro de la contraseña
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    try {
+      const info = insertUserStmt.run(cleanUsername, passwordHash);
+      console.log(`Usuario registrado: ${cleanUsername}`);
+
+      return sendOk(res, 201, 'Usuario registrado exitosamente.', {
+        userId: String(info.lastInsertRowid),
+        username: cleanUsername
+      });
+    } catch (dbErr) {
+      // Capturar restricción UNIQUE para evitar condiciones de carrera
+      if (dbErr.code === 'SQLITE_CONSTRAINT_UNIQUE' || (dbErr.message && dbErr.message.includes('UNIQUE constraint failed'))) {
+        return sendError(
+          res,
+          409,
+          'USERNAME_TAKEN',
+          'El nombre de usuario ya está registrado.',
+          'Elige otro username o inicia sesión en POST /login.',
+          [{ field: 'username', problem: 'already exists' }]
+        );
+      }
+      throw dbErr;
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /login - Autenticación y emisión de JWT
+app.post('/login', async (req, res, next) => {
+  try {
+    // Validación básica de presencia de campos sin filtrar reglas avanzadas
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      Array.isArray(req.body) ||
+      Object.keys(req.body).length === 0
+    ) {
+      return sendError(
+        res,
+        400,
+        'INVALID_BODY',
+        'El cuerpo de la petición es inválido o no es un objeto JSON.',
+        'Envía JSON con header Content-Type: application/json y los campos username y password.'
+      );
+    }
+
+    const { username, password } = req.body;
+
+    if (
+      typeof username !== 'string' ||
+      typeof password !== 'string' ||
+      !username.trim() ||
+      !password
+    ) {
+      return sendError(
+        res,
+        400,
+        'INVALID_BODY',
+        'Se requieren los campos username y password como cadenas de texto.',
+        'Envía JSON con header Content-Type: application/json y los campos username y password.'
+      );
+    }
+
+    const cleanUsername = username.trim();
+    const user = findUserByUsernameStmt.get(cleanUsername);
+
+    if (!user) {
+      // Comparación contra hash ficticio para evitar enumeración por temporización
+      await bcrypt.compare(password, DUMMY_HASH);
+      return sendError(
+        res,
+        401,
+        'INVALID_CREDENTIALS',
+        'Credenciales inválidas.',
+        'Verifica usuario y contraseña, o regístrate en POST /register.'
+      );
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!isValidPassword) {
+      return sendError(
+        res,
+        401,
+        'INVALID_CREDENTIALS',
+        'Credenciales inválidas.',
+        'Verifica usuario y contraseña, o regístrate en POST /register.'
+      );
+    }
+
+    // Emisión de JWT con HS256 explícito y expiración configurada
+    const token = jwt.sign(
+      {
+        userId: String(user.id),
+        username: user.username
+      },
+      JWT_SECRET,
+      {
+        algorithm: 'HS256',
+        expiresIn: JWT_EXPIRES_IN
+      }
+    );
+
+    // Calcular expiresIn dinámico en segundos a partir de exp - iat del token generado
+    const decoded = jwt.decode(token);
+    const expiresIn = (decoded && decoded.exp && decoded.iat)
+      ? (decoded.exp - decoded.iat)
+      : 3600;
+
+    console.log(`Login exitoso: ${user.username}`);
+
+    return sendOk(res, 200, 'Inicio de sesión exitoso.', {
+      token,
+      username: user.username,
+      expiresIn
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Handler 404 para cualquier ruta inexistente
+app.use((req, res) => {
+  sendError(
+    res,
+    404,
+    'NOT_FOUND',
+    `Ruta ${req.method} ${req.originalUrl} no encontrada.`,
+    'Rutas disponibles: GET /health, POST /register, POST /login.'
+  );
+});
+
+// Error-handler centralizado (4 argumentos)
+app.use((err, req, res, next) => {
+  // Manejo de JSON malformado
+  if (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400 && 'body' in err)) {
+    return sendError(
+      res,
+      400,
+      'INVALID_BODY',
+      'JSON malformado o no parseable en el cuerpo de la petición.',
+      'Envía JSON válido con header Content-Type: application/json.'
+    );
+  }
+
+  // Errores internos no controlados: nunca exponer stack traces, SQL ni secretos
+  console.error('Error interno no controlado:', err.message || err);
+  return sendError(
+    res,
+    500,
+    'INTERNAL_ERROR',
+    'Ocurrió un error interno en el servidor.',
+    'Intenta de nuevo; si persiste, revisa los logs del servicio.'
+  );
+});
+
+// 6. Arranque del servidor HTTP
+const server = app.listen(PORT, () => {
+  console.log(`Auth Service escuchando en http://localhost:${PORT}`);
+});
+
+module.exports = { app, server, db };
