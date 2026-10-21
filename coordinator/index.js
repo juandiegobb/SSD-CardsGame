@@ -1,119 +1,304 @@
-// Coordinator: recibe workers por WebSocket, expone su estado por HTTP
-// y sirve el dashboard en http://localhost:<COORDINATOR_PORT>.
-// HTTP y WebSocket comparten el mismo puerto.
-//
-// Configuración (en orden de prioridad):
-//   1. Parámetros:  npm run coordinator -- --port 3001 --role PRIMARY
-//                   npm run coordinator 3001          (atajo: solo el puerto)
-//   2. Variables de entorno, cargadas desde .env (ver .env.example)
-//   3. Valores por defecto
+// Coordinador — Taller 4, Sistemas Distribuidos (Universidad de Boyacá)
+// Responsabilidad: aceptar conexiones WebSocket autenticadas con JWT, mantener
+// un Map de jugadores en línea y hacer broadcast de la lista ante cada cambio.
+// Puerto por defecto: 5000. WebSocket en /connect?token=<JWT>.
 
-const path = require("node:path");
-const { parseArgs } = require("node:util");
-const express = require("express");
-const cors = require("cors");
-const { WebSocketServer } = require("ws");
+require('dotenv').config();
+const http = require('node:http');
+const { URL } = require('node:url');
+const express = require('express');
+const { WebSocketServer } = require('ws');
+const jwt = require('jsonwebtoken');
 
-const { values: args, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-        port: { type: "string" },
-        role: { type: "string" },
-    },
-});
-
-const PORT = Number(args.port || positionals[0] || process.env.COORDINATOR_PORT || 3000);
-const TIMEOUT = Number(process.env.HEARTBEAT_TIMEOUT || 5000);
-const ID = Math.floor(Math.random() * 10000);
-
-let role = args.role || process.env.COORDINATOR_ROLE || "PRIMARY";
-const servers = {}; // id -> { id, url, lastHeartbeat }
-let totalTimeouts = 0;
-
-// ---------- HTTP ----------
-const app = express();
-app.use(cors()); // el dashboard de cada worker (otro origen) consulta /status desde el navegador
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public"))); // dashboard
-app.use(express.static(path.join(__dirname, "..", "dashboard"))); // estilos y JS compartidos
-
-app.get("/status", (req, res) => {
-    res.json({ id: ID, role, servers: Object.values(servers), totalTimeouts });
-});
-
-const server = app.listen(PORT, (err) => {
-    if (err) throw err; // p. ej. puerto ocupado
-    console.log(`Coordinator ${ID} (${role}) en http://localhost:${PORT} y ws://localhost:${PORT}`);
-});
-
-// ---------- WebSocket ----------
-const wss = new WebSocketServer({ server });
-
-wss.on("connection", (ws) => {
-    ws.on("message", (raw) => {
-        let msg;
-        try {
-            msg = JSON.parse(raw);
-        } catch {
-            return send(ws, "error", { message: "invalid json" });
-        }
-
-        const handler = handlers[msg.type];
-        if (!handler) return send(ws, "error", { message: `unknown type: ${msg.type}` });
-
-        handler(ws, msg.data || {});
-    });
-});
-
-// Todos los mensajes tienen la forma { type, data }
-function send(ws, type, data = {}) {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type, data }));
+// ── Verificación de configuración crítica ────────────────────────────────────
+if (!process.env.JWT_SECRET) {
+  console.error('Error crítico: La variable de entorno JWT_SECRET no está definida.');
+  process.exit(1);
 }
 
-// Envía un mensaje a todos los clientes conectados (workers y dashboards).
-// Esto es lo que HTTP no puede hacer: el servidor habla sin que le pregunten.
-function broadcast(type, data) {
-    for (const client of wss.clients) send(client, type, data);
+const JWT_SECRET = process.env.JWT_SECRET;
+const PORT = Number(process.env.PORT) || 5000;
+
+// ── Estado del coordinador ──────────────────────────────────────────────────
+// Map: userId (string) → { username, socket, connectedAt, expirationTimer }
+const players = new Map();
+
+// ── Helpers de respuesta HTTP (mismo formato que Auth, SPEC.md §3.1) ────────
+function sendOk(res, status, message, extra = {}) {
+  return res.status(status).json({ ok: true, message, ...extra });
 }
 
-const handlers = {
-    register(ws, { id, url }) {
-        if (role !== "PRIMARY") return send(ws, "error", { message: "server not primary" });
-        if (!id || !url) return send(ws, "error", { message: "id and url required" });
+function sendError(res, status, code, message, hint) {
+  return res.status(status).json({ ok: false, code, message, hint });
+}
 
-        servers[id] = { id, url, lastHeartbeat: Date.now() };
-        console.log(`Servidor registrado: ${id} -> ${url}`);
-        send(ws, "registered", { id });
-        broadcast("server_joined", { id, url });
-    },
+// ── Helper para enviar un mensaje WS a un socket (si está abierto) ──────────
+function sendWs(ws, payload) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(payload));
+  }
+}
 
-    pulse(ws, { id }) {
-        if (role !== "PRIMARY") return send(ws, "error", { message: "server not primary" });
-        if (!servers[id]) return send(ws, "error", { message: "server not registered" });
+// ── Broadcast de la lista de jugadores a TODOS los sockets abiertos ──────────
+// Formato exacto del PDF: { type, players: [{ userId, username }] }
+function broadcastPlayers() {
+  const playerList = [];
+  for (const [userId, entry] of players) {
+    playerList.push({ userId, username: entry.username });
+  }
+  const msg = JSON.stringify({ type: 'players_update', players: playerList });
 
-        servers[id].lastHeartbeat = Date.now();
-        send(ws, "pulse_received", { id });
-    },
-
-    get_servers(ws) {
-        send(ws, "servers", { activeServers: Object.values(servers) });
-    },
-
-    get_metrics(ws) {
-        send(ws, "metrics", { totalServersTracked: Object.keys(servers).length, totalTimeouts });
-    },
-};
-
-// Elimina workers que dejaron de enviar pulsos
-setInterval(() => {
-    const now = Date.now();
-
-    for (const id in servers) {
-        if (now - servers[id].lastHeartbeat > TIMEOUT) {
-            console.log(`Servidor eliminado por timeout: ${id}`);
-            delete servers[id];
-            totalTimeouts++;
-            broadcast("server_left", { id });
-        }
+  for (const [, entry] of players) {
+    if (entry.socket.readyState === entry.socket.OPEN) {
+      entry.socket.send(msg);
     }
-}, 2000);
+  }
+}
+
+// ── Express — endpoints HTTP ─────────────────────────────────────────────────
+const app = express();
+app.use(express.json());
+
+// GET /health
+app.get('/health', (req, res) => {
+  sendOk(res, 200, 'Coordinador operativo.', {
+    service: 'coordinator',
+    uptime: Math.floor(process.uptime()),
+    onlineCount: players.size
+  });
+});
+
+// GET /players — solo lectura y diagnóstico; nunca expone sockets ni tokens
+app.get('/players', (req, res) => {
+  const playerList = [];
+  for (const [userId, entry] of players) {
+    playerList.push({ userId, username: entry.username });
+  }
+  sendOk(res, 200, `Hay ${players.size} jugador(es) en línea.`, {
+    count: players.size,
+    players: playerList
+  });
+});
+
+// Handler 404 para rutas HTTP desconocidas
+app.use((req, res) => {
+  sendError(
+    res, 404,
+    'NOT_FOUND',
+    `Ruta ${req.method} ${req.originalUrl} no encontrada.`,
+    'Rutas HTTP disponibles: GET /health, GET /players. El WebSocket está en /connect?token=<JWT>.'
+  );
+});
+
+// ── Servidor HTTP (http.createServer es requerido para el upgrade manual) ────
+const server = http.createServer(app);
+
+// ── Servidor WebSocket (noServer: true — el upgrade se maneja manualmente) ───
+const wss = new WebSocketServer({ noServer: true });
+
+// ── Evento upgrade: verificación de JWT ANTES de aceptar la conexión WS ──────
+// Error típico #3 del PDF: no verificar en upgrade sino dentro de connection.
+server.on('upgrade', (req, socket, head) => {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  } catch {
+    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  // Solo se acepta la ruta /connect
+  if (parsedUrl.pathname !== '/connect') {
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const token = parsedUrl.searchParams.get('token');
+
+  // Sin token
+  if (!token) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      sendWs(ws, {
+        type: 'error',
+        ok: false,
+        code: 'TOKEN_MISSING',
+        message: 'No se proporcionó token de autenticación.',
+        hint: 'Conéctate con ws://host/connect?token=<JWT> obtenido en POST /login.'
+      });
+      ws.close(4001, 'invalid token');
+    });
+    return;
+  }
+
+  // Verificación del token
+  let payload;
+  try {
+    payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+  } catch (err) {
+    let code = 'TOKEN_MALFORMED';
+    let message = 'El token es inválido o no puede procesarse.';
+    let hint = 'Copia el token completo devuelto por POST /login.';
+
+    if (err.name === 'TokenExpiredError') {
+      code = 'TOKEN_EXPIRED';
+      message = 'El token de autenticación ha expirado.';
+      hint = 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.';
+    } else if (err.name === 'JsonWebTokenError') {
+      if (err.message === 'invalid signature') {
+        code = 'TOKEN_INVALID_SIGNATURE';
+        message = 'La firma del token no es válida.';
+        hint = 'Verifica que JWT_SECRET sea idéntica en auth-service y coordinator.';
+      }
+      // "jwt malformed" y otros caen en TOKEN_MALFORMED (por defecto arriba)
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      sendWs(ws, { type: 'error', ok: false, code, message, hint });
+      ws.close(4001, 'invalid token');
+    });
+    return;
+  }
+
+  // Token válido → completar el handshake y emitir connection con el payload
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, payload);
+  });
+});
+
+// ── Evento connection: gestión del jugador ────────────────────────────────────
+wss.on('connection', (ws, payload) => {
+  const userId = String(payload.userId);
+  const username = payload.username;
+
+  // Política de doble pestaña (SPEC.md §3.5): la conexión nueva reemplaza a la anterior.
+  // Justificación: un socket "zombi" de una reconexión o refresh bloquearía al usuario
+  // si se rechazara la nueva conexión. La intención más reciente del usuario prevalece.
+  if (players.has(userId)) {
+    const existing = players.get(userId);
+    // Cancela el timer de expiración de la sesión anterior
+    clearTimeout(existing.expirationTimer);
+    // Cierra el socket viejo con el código 4002 (el cliente sabrá que fue reemplazado)
+    if (existing.socket.readyState === existing.socket.OPEN) {
+      existing.socket.close(4002, 'session replaced');
+    }
+    console.log(`Sesión reemplazada para: ${username}`);
+  }
+
+  // Registrar la nueva entrada en el Map
+  const entry = {
+    username,
+    socket: ws,
+    connectedAt: new Date().toISOString(),
+    expirationTimer: null
+  };
+  players.set(userId, entry);
+
+  console.log(`Jugador conectado: ${username}`);
+
+  // Mensaje de bienvenida solo al socket nuevo
+  sendWs(ws, {
+    type: 'connected',
+    ok: true,
+    message: `Conexión autenticada como ${username}.`,
+    userId,
+    username,
+    onlineCount: players.size
+  });
+
+  // Broadcast de la lista actualizada a TODOS (incluido el nuevo)
+  broadcastPlayers();
+
+  // Timer de expiración en caliente (SPEC.md §3.6)
+  // Al vencer el JWT mientras el socket sigue abierto, se notifica y se cierra.
+  const msUntilExpiry = payload.exp * 1000 - Date.now();
+  if (msUntilExpiry > 0) {
+    entry.expirationTimer = setTimeout(() => {
+      console.log(`Token expirado para: ${username}`);
+      sendWs(ws, {
+        type: 'error',
+        ok: false,
+        code: 'TOKEN_EXPIRED',
+        message: 'Tu token de autenticación ha expirado.',
+        hint: 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.'
+      });
+      ws.close(4003, 'token expired');
+    }, msUntilExpiry);
+  }
+
+  // ── Mensajes cliente → servidor ────────────────────────────────────────────
+  ws.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      // Texto que no es JSON válido
+      sendWs(ws, {
+        type: 'error',
+        ok: false,
+        code: 'INVALID_JSON',
+        message: 'El mensaje recibido no es JSON válido.',
+        hint: 'Envía JSON, por ejemplo {"type":"ping"}.'
+      });
+      return;
+    }
+
+    switch (msg.type) {
+      case 'ping':
+        sendWs(ws, {
+          type: 'pong',
+          ok: true,
+          message: 'Conexión viva.',
+          serverTime: new Date().toISOString()
+        });
+        break;
+
+      case 'who':
+        // Responde players_update solo al socket que preguntó
+        {
+          const playerList = [];
+          for (const [uid, e] of players) {
+            playerList.push({ userId: uid, username: e.username });
+          }
+          sendWs(ws, { type: 'players_update', players: playerList });
+        }
+        break;
+
+      default:
+        sendWs(ws, {
+          type: 'error',
+          ok: false,
+          code: 'UNKNOWN_MESSAGE_TYPE',
+          message: `Tipo de mensaje no reconocido: ${msg.type ?? '(sin tipo)'}.`,
+          hint: 'Tipos soportados: ping, who.'
+        });
+    }
+  });
+
+  // ── Cierre del socket ──────────────────────────────────────────────────────
+  ws.on('close', () => {
+    // CRÍTICO: solo borrar del Map y cancelar el timer si este socket es el vigente.
+    // Si fue reemplazado (política 3.5), el timer del viejo ya fue cancelado al reemplazarlo
+    // y el socket viejo cierra pero NO debe tocar la entrada/timer del nuevo ni hacer broadcast.
+    if (players.get(userId)?.socket === ws) {
+      clearTimeout(entry.expirationTimer);
+      players.delete(userId);
+      console.log(`Jugador desconectado: ${username}`);
+      broadcastPlayers();
+    }
+  });
+
+  // ── Errores del socket (evita caídas del proceso) ──────────────────────────
+  ws.on('error', (err) => {
+    console.error(`Error en el socket de ${username}:`, err.message || err.code || err);
+  });
+});
+
+// ── Arranque del servidor ─────────────────────────────────────────────────────
+server.listen(PORT, () => {
+  console.log(`Coordinador escuchando en http://localhost:${PORT}`);
+  console.log(`WebSocket disponible en ws://localhost:${PORT}/connect?token=<JWT>`);
+});
+
+module.exports = { app, server, wss, players };
