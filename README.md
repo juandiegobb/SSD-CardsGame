@@ -175,6 +175,8 @@ Copia los archivos de ejemplo en cada servicio:
    COORDINATOR_WS_URL=ws://localhost:5000
    ```
 
+> 💡 **Recarga en caliente de `JWT_EXPIRES_IN`:** La variable `JWT_EXPIRES_IN` en `auth-service/.env` se relee dinámicamente en cada petición `POST /login` (con `dotenv.parse`), permitiendo cambiar la expiración a `10s` o `30s` sin reiniciar el Auth Service. Los tokens emitidos previamente conservan su tiempo de expiración original (firmado en su payload). Las demás variables (`PORT`, `JWT_SECRET`, `BCRYPT_ROUNDS`, `CORS_ORIGINS`) se cargan al iniciar el proceso y requieren reiniciar el servicio.
+
 ### 4.4. Orden Recomendado de Arranque
 Abre 3 terminales separadas en la raíz del proyecto y arranca en este orden:
 
@@ -232,19 +234,21 @@ Todas las respuestas JSON del sistema respetan un estándar uniforme:
 * **Cliente → Servidor:**
   * `{"type":"ping"}` → Responde `{"type":"pong", "ok":true, "serverTime":"..."}`
   * `{"type":"who"}` → Responde `players_update` únicamente al socket que solicitó.
+  * `{"type":"verify","token":"<JWT>"}` → Valida si el token es vigente y pertenece a esta sesión. Si es válido responde `verified`. Si es inválido/malformado/de otro usuario responde `error` y desconecta con `4001`. Si expiró responde `error TOKEN_EXPIRED` y desconecta con `4003`.
   * Mensaje no reconocido → Responde error `UNKNOWN_MESSAGE_TYPE` (no cierra socket).
   * Texto no JSON → Responde error `INVALID_JSON` (no cierra socket).
 
 * **Servidor → Cliente:**
   * `{"type":"connected", "ok":true, "userId":"1", "username":"alice", "onlineCount":1}`
   * `{"type":"players_update", "players":[{"userId":"1", "username":"alice"}]}`
-  * `{"type":"error", "code":"...", "message":"...", "hint":"..."}`
+  * `{"type":"verified", "ok":true, "message":"Token verificado.", "expiresAt":"2026-..."}`
+  * `{"type":"error", "code":"...", "message":"...", "hint":"..."}` (incluye `TOKEN_MISMATCH` si el token no corresponde al usuario del socket)
 
 * **Códigos de Cierre (Close Codes):**
   | Código | Razón | Causado por | Reacción esperada en Cliente |
   |---|---|---|---|
   | `1000` | `"logout"` | Cliente (Botón 'Cerrar sesión') | Cierre intencional; borra token y redirige a login sin error. |
-  | `4001` | `"invalid token"` | Coordinador (Token vencido, corrupto o mala firma) | Borra token de `localStorage` y redirige a login con aviso. |
+  | `4001` | `"invalid token"` | Coordinador (Token corrupto, mala firma, o TOKEN_MISMATCH de otro usuario) | Borra token de `localStorage` y redirige a login con aviso. |
   | `4002` | `"session replaced"` | Coordinador (Mismo usuario abrió otra pestaña) | Cierra pestaña vieja; **NO** borra token (política doble pestaña). |
   | `4003` | `"token expired"` | Coordinador (Venció el JWT con socket abierto) | Expulsión en caliente; borra token y redirige a login con aviso. |
 
@@ -380,6 +384,24 @@ Estando conectado en `wscat`:
 * **Token expirado:** Conectar con un token cuyo `exp` ya pasó  
   → Recibe `TOKEN_EXPIRED` y desconexión con código `4001`.
 
+#### 4. Validación de Sesión en Vivo (`verify`)
+Estando conectado en `wscat`:
+* **Token válido del mismo usuario:**  
+  Enviar `{"type":"verify","token":"<TOKEN_ALICE>"}`  
+  → Recibe `verified` con confirmación y `expiresAt`.
+* **Token malformado / basura:**  
+  Enviar `{"type":"verify","token":"basura"}`  
+  → Recibe `error TOKEN_MALFORMED` y desconexión con código `4001 (invalid token)`.
+* **Sin campo token:**  
+  Enviar `{"type":"verify"}`  
+  → Recibe `error TOKEN_MISSING` y desconexión con código `4001`.
+* **Token expirado:**  
+  Enviar token vencido  
+  → Recibe `error TOKEN_EXPIRED` y desconexión con código `4003 (token expired)`.
+* **Token de otro usuario:**  
+  Enviar token válido emitido para Bob en el socket de Alice  
+  → Recibe `error TOKEN_MISMATCH` ("El token no corresponde a esta sesión") y desconexión con código `4001`.
+
 ---
 
 ## 8. Decisiones de Diseño Justificadas
@@ -417,6 +439,14 @@ Esta sección sustenta los requerimientos clave exigidos en el taller:
 8. **Configuración Dinámica del Cliente (`/config.js`):**
    * *Decisión:* El cliente web obtiene `AUTH_URL` y `COORDINATOR_WS_URL` en tiempo de ejecución solicitando `/config.js`, en lugar de compilar URLs estáticas.
    * *Por qué:* Permite cambiar entre pruebas locales (`localhost`) y URLs públicas de ngrok simplemente ajustando variables de entorno, sin tener que reconstruir o editar código del frontend.
+
+9. **Detección Inmediata de Tokens Alterados (Session Watcher y Mensaje WS `verify`):**
+   * *Decisión:* El cliente en `lobby.html` implementa un session watcher periódico (~300 ms por `setInterval`) que compara `localStorage.getItem('token')` con el token de apertura, complementado con el evento `storage` y un latido secundario cada ~5 s enviando `{"type":"verify","token":"..."}`.
+   * *Por qué:* El evento nativo `storage` del navegador **no** se dispara en la misma pestaña que ejecuta la modificación en DevTools. Con este sondeo activo, al ensuciar o alterar el token en DevTools, el cliente envía `verify` al Coordinador en ≤ 300 ms, quien lo rechaza criptográficamente y cierra el socket con código `4001`. El usuario es expulsado de inmediato (≤ 1 s) sin recargar la página. Si el token es borrado (`null`), se cierra de forma local con `1000 'logout'` y aviso visible.
+
+10. **Recarga en Caliente de `JWT_EXPIRES_IN` en Auth Service:**
+    * *Decisión:* `auth-service` relee su archivo `.env` en cada petición `POST /login` mediante `dotenv.parse`, validando formatos numéricos (segundos) o sufijos de tiempo (`10s`, `30s`, `1h`).
+    * *Por qué:* Permite a los evaluadores cambiar la expiración a `10s` o `30s` para demostrar la expulsión en vivo (código 4003) sin reiniciar el servidor ni reiniciar la base de datos SQLite. Los tokens emitidos con anterioridad conservan su `exp` original porque la firma digital del JWT sella ese valor.
 
 ---
 
