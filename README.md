@@ -465,7 +465,7 @@ ngrok start --all --config ngrok.example.yml
 
 ---
 
-## 12. Equipo y Reparto de Fases
+## 11. Equipo y Reparto de Fases
 
 | Fase | Componente / Responsabilidad | Integrante Responsable |
 |:---:|---|---|

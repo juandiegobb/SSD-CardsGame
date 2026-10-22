@@ -97,7 +97,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 // ── Evento upgrade: verificación de JWT ANTES de aceptar la conexión WS ──────
-// Error típico #3 del PDF: no verificar en upgrade sino dentro de connection.
+// Error típico: no verificar en upgrade sino dentro de connection.
 server.on('upgrade', (req, socket, head) => {
   let parsedUrl;
   try {
