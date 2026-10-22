@@ -3,7 +3,9 @@
 // Puerto por defecto: 4000
 
 require('dotenv').config();
+const fs = require('node:fs');
 const path = require('node:path');
+const dotenv = require('dotenv');
 const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
@@ -19,7 +21,49 @@ if (!process.env.JWT_SECRET) {
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = Number(process.env.PORT) || 4000;
 const DB_PATH = process.env.DB_PATH || 'users.db';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
+const ENV_PATH = path.join(__dirname, '.env');
+
+// Almacena en memoria el último valor válido de expiración (por defecto el del arranque o '1h')
+let currentJwtExpiresIn = process.env.JWT_EXPIRES_IN || '1h';
+// Si el valor inicial eran solo dígitos, normalizar a Number (segundos)
+if (/^\d+$/.test(String(currentJwtExpiresIn).trim())) {
+  currentJwtExpiresIn = Number(String(currentJwtExpiresIn).trim());
+}
+
+// Función que lee el .env en caliente en cada consulta sin reiniciar el proceso
+function getJwtExpiresIn() {
+  try {
+    if (fs.existsSync(ENV_PATH)) {
+      const rawEnv = fs.readFileSync(ENV_PATH, 'utf8');
+      const parsed = dotenv.parse(rawEnv);
+      if (parsed && parsed.JWT_EXPIRES_IN !== undefined) {
+        const val = parsed.JWT_EXPIRES_IN.trim();
+
+        // 1. Si son solo dígitos (ej. "10"), convertir con Number() para interpretarlo como SEGUNDOS
+        // (un string numérico "10" en jsonwebtoken se interpretaría como 10 milisegundos)
+        if (/^\d+$/.test(val)) {
+          const num = Number(val);
+          if (num > 0) {
+            currentJwtExpiresIn = num;
+            return currentJwtExpiresIn;
+          }
+        } else if (/^\d+[smhdw]$/i.test(val)) {
+          // 2. Valores con sufijo de tiempo (ej. '10s', '30s', '1h', '7d')
+          currentJwtExpiresIn = val;
+          return currentJwtExpiresIn;
+        }
+
+        // 3. Valor inválido o vacío: emitir advertencia genérica sin filtrar contenido ni secretos
+        if (val !== '') {
+          console.warn('[auth-service] Advertencia: Formato de JWT_EXPIRES_IN inválido en .env. Se conserva el último valor válido.');
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[auth-service] Advertencia al leer .env para JWT_EXPIRES_IN:', err.message || err);
+  }
+  return currentJwtExpiresIn;
+}
 
 // BCRYPT_ROUNDS: Mínimo 10 por especificación de seguridad
 let configuredRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
@@ -83,7 +127,7 @@ app.use(cors({
   origin: (origin, callback) => {
     // Permitir peticiones sin origen (curl, Thunder Client, mobile apps)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+if (allowedOrigins.includes(origin) || allowedOrigins.includes('*') || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('ngrok-free.app') || origin.includes('ngrok-free.dev') || origin.includes('ngrok.io')) {
       return callback(null, true);
     }
     return callback(null, false);
@@ -98,11 +142,13 @@ app.use(express.json());
 
 // 5. Endpoints de la API
 
-// GET /health - Monitoreo y estado del servicio
+// GET /health - Monitoreo y estado del servicio (incluye jwtExpiresIn activo)
 app.get('/health', (req, res) => {
+  const activeExpiresIn = getJwtExpiresIn();
   sendOk(res, 200, 'Servicio de autenticación operativo.', {
     service: 'auth-service',
-    uptime: Math.floor(process.uptime())
+    uptime: Math.floor(process.uptime()),
+    jwtExpiresIn: String(activeExpiresIn)
   });
 });
 
@@ -245,18 +291,35 @@ app.post('/login', async (req, res, next) => {
       );
     }
 
-    // Emisión de JWT con HS256 explícito y expiración configurada
-    const token = jwt.sign(
-      {
-        userId: String(user.id),
-        username: user.username
-      },
-      JWT_SECRET,
-      {
-        algorithm: 'HS256',
-        expiresIn: JWT_EXPIRES_IN
-      }
-    );
+    // Emisión de JWT con HS256 explícito y expiración recargada en caliente
+    const activeExpiresIn = getJwtExpiresIn();
+    let token;
+    try {
+      token = jwt.sign(
+        {
+          userId: String(user.id),
+          username: user.username
+        },
+        JWT_SECRET,
+        {
+          algorithm: 'HS256',
+          expiresIn: activeExpiresIn
+        }
+      );
+    } catch (signErr) {
+      console.warn('[auth-service] Advertencia al firmar con expiración dinámica. Usando respaldo de 1h.');
+      token = jwt.sign(
+        {
+          userId: String(user.id),
+          username: user.username
+        },
+        JWT_SECRET,
+        {
+          algorithm: 'HS256',
+          expiresIn: '1h'
+        }
+      );
+    }
 
     // Calcular expiresIn dinámico en segundos a partir de exp - iat del token generado
     const decoded = jwt.decode(token);
