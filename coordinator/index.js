@@ -94,6 +94,27 @@ app.use((req, res) => {
 const server = http.createServer(app);
 
 // ── Servidor WebSocket (noServer: true — el upgrade se maneja manualmente) ───
+// ── Helper para clasificar errores de verificación JWT (reutilizado en upgrade y verify) ──
+function classifyJwtError(err) {
+  let code = 'TOKEN_MALFORMED';
+  let message = 'El token es inválido o no puede procesarse.';
+  let hint = 'Copia el token completo devuelto por POST /login.';
+
+  if (err.name === 'TokenExpiredError') {
+    code = 'TOKEN_EXPIRED';
+    message = 'El token de autenticación ha expirado.';
+    hint = 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.';
+  } else if (err.name === 'JsonWebTokenError') {
+    if (err.message === 'invalid signature') {
+      code = 'TOKEN_INVALID_SIGNATURE';
+      message = 'La firma del token no es válida.';
+      hint = 'Verifica que JWT_SECRET sea idéntica en auth-service y coordinator.';
+    }
+  }
+
+  return { code, message, hint };
+}
+
 const wss = new WebSocketServer({ noServer: true });
 
 // ── Evento upgrade: verificación de JWT ANTES de aceptar la conexión WS ──────
@@ -137,23 +158,7 @@ server.on('upgrade', (req, socket, head) => {
   try {
     payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
   } catch (err) {
-    let code = 'TOKEN_MALFORMED';
-    let message = 'El token es inválido o no puede procesarse.';
-    let hint = 'Copia el token completo devuelto por POST /login.';
-
-    if (err.name === 'TokenExpiredError') {
-      code = 'TOKEN_EXPIRED';
-      message = 'El token de autenticación ha expirado.';
-      hint = 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.';
-    } else if (err.name === 'JsonWebTokenError') {
-      if (err.message === 'invalid signature') {
-        code = 'TOKEN_INVALID_SIGNATURE';
-        message = 'La firma del token no es válida.';
-        hint = 'Verifica que JWT_SECRET sea idéntica en auth-service y coordinator.';
-      }
-      // "jwt malformed" y otros caen en TOKEN_MALFORMED (por defecto arriba)
-    }
-
+    const { code, message, hint } = classifyJwtError(err);
     wss.handleUpgrade(req, socket, head, (ws) => {
       sendWs(ws, { type: 'error', ok: false, code, message, hint });
       ws.close(4001, 'invalid token');
@@ -265,13 +270,63 @@ wss.on('connection', (ws, payload) => {
         }
         break;
 
+      case 'verify': {
+        // Validación de presencia y tipo de token
+        if (!msg.token || typeof msg.token !== 'string') {
+          sendWs(ws, {
+            type: 'error',
+            ok: false,
+            code: 'TOKEN_MISSING',
+            message: 'No se proporcionó token de autenticación.',
+            hint: 'Envía un token válido en el campo token: {"type":"verify","token":"<JWT>"}.'
+          });
+          ws.close(4001, 'invalid token');
+          return;
+        }
+
+        let verifyPayload;
+        try {
+          verifyPayload = jwt.verify(msg.token, JWT_SECRET, { algorithms: ['HS256'] });
+        } catch (err) {
+          const { code, message, hint } = classifyJwtError(err);
+          sendWs(ws, { type: 'error', ok: false, code, message, hint });
+          const closeCode = (code === 'TOKEN_EXPIRED') ? 4003 : 4001;
+          const closeReason = (code === 'TOKEN_EXPIRED') ? 'token expired' : 'invalid token';
+          ws.close(closeCode, closeReason);
+          return;
+        }
+
+        // Token válido pero de otro usuario
+        if (String(verifyPayload.userId) !== userId) {
+          sendWs(ws, {
+            type: 'error',
+            ok: false,
+            code: 'TOKEN_MISMATCH',
+            message: 'El token no corresponde a esta sesión.',
+            hint: 'Cierra sesión e inicia con el mismo usuario.'
+          });
+          ws.close(4001, 'invalid token');
+          return;
+        }
+
+        // Token válido y del mismo usuario: responder verified
+        // No se reprograma el timer de expiración (conserva el exp original del socket)
+        sendWs(ws, {
+          type: 'verified',
+          ok: true,
+          message: 'Token verificado.',
+          expiresAt: new Date(verifyPayload.exp * 1000).toISOString()
+        });
+        break;
+      }
+
       default:
         sendWs(ws, {
           type: 'error',
           ok: false,
           code: 'UNKNOWN_MESSAGE_TYPE',
           message: `Tipo de mensaje no reconocido: ${msg.type ?? '(sin tipo)'}.`,
-          hint: 'Tipos soportados: ping, who.'
+          hint: 'Tipos soportados: ping, who, verify.'
         });
     }
   });
