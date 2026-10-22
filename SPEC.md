@@ -119,7 +119,7 @@ SSD-C.../
 
 | Método | Ruta | Body | Éxito | Errores |
 |---|---|---|---|---|
-| GET | `/health` | — | `200 { ok, message, service:"auth-service", uptime }` | — |
+| GET | `/health` | — | `200 { ok, message, service:"auth-service", uptime, jwtExpiresIn }` | — |
 | POST | `/register` | `{ username, password }` | **`201 { ok, message, userId, username }`** | `400 INVALID_BODY / INVALID_USERNAME / INVALID_PASSWORD`, `409 USERNAME_TAKEN`, `500 INTERNAL_ERROR` |
 | POST | `/login` | `{ username, password }` | **`200 { ok, message, token, username, expiresIn }`** | `400 INVALID_BODY`, `401 INVALID_CREDENTIALS`, `500 INTERNAL_ERROR` |
 | * | cualquier otra | — | — | `404 NOT_FOUND` (indica métodos/rutas disponibles en `hint`) |
@@ -137,6 +137,7 @@ SSD-C.../
 - `409` se garantiza capturando el error `SQLITE_CONSTRAINT_UNIQUE` del `INSERT` (no solo con `SELECT` previo) para evitar condiciones de carrera.
 - `/login` responde el **mismo** `401 INVALID_CREDENTIALS` tanto si el usuario no existe como si la clave es errónea (evita enumeración de usuarios).
 - JWT: `HS256`, payload `{ userId, username, iat, exp }`, `exp = iat + 1h` (`JWT_EXPIRES_IN` en `.env`). `userId` se emite como **string**.
+- `JWT_EXPIRES_IN`: se relee en cada `POST /login` directamente del archivo `.env` mediante `dotenv.parse` (recarga en vivo sin reiniciar el servicio). Un token ya emitido conserva su `exp` original.
 - `cors()` habilitado en el auth (orígenes por `.env`), permitiendo el header `ngrok-skip-browser-warning` (ver Fase 4).
 
 **Catálogo de códigos HTTP del Auth:**
@@ -175,6 +176,7 @@ SSD-C.../
 | `connected` | Solo al socket recién autenticado, justo después de agregarlo al `Map` | `{ "type":"connected", "ok":true, "message":"Conexión autenticada como alice.", "userId":"1", "username":"alice", "onlineCount":2 }` |
 | `players_update` | A **todos** los conectados (incluido el nuevo) cada vez que alguien entra o sale | `{ "type":"players_update", "players":[{"userId":"1","username":"alice"}, ...] }` ← formato exacto del PDF |
 | `pong` | Respuesta a `ping` | `{ "type":"pong", "ok":true, "message":"Conexión viva.", "serverTime":"2026-..." }` |
+| `verified` | Respuesta a `verify` cuando el token es válido y del mismo usuario | `{ "type":"verified", "ok":true, "message":"Token verificado.", "expiresAt":"<ISO de exp>" }` |
 | `error` | Mensaje del cliente inválido o fallo de autenticación | `{ "type":"error", "ok":false, "code":"UNKNOWN_MESSAGE_TYPE", "message":"...", "hint":"..." }` |
 
 **Mensajes cliente → servidor** (para probar con `wscat`):
@@ -193,11 +195,12 @@ SSD-C.../
 | `TOKEN_MALFORMED` | El string no es un JWT | "Copia el token completo devuelto por POST /login." |
 | `TOKEN_INVALID_SIGNATURE` | Firmado con otra clave | "Verifica que JWT_SECRET sea idéntica en auth-service y coordinator." |
 | `TOKEN_EXPIRED` | `exp` vencido | "Inicia sesión de nuevo en POST /login para obtener un token nuevo." |
+| `TOKEN_MISMATCH` | Token válido pero con `userId` distinto al de este socket | "Cierra sesión e inicia con el mismo usuario." |
 | `INVALID_JSON` | El cliente envió texto que no es JSON | "Envía JSON, por ejemplo {\"type\":\"ping\"}." |
 | `UNKNOWN_MESSAGE_TYPE` | `type` no soportado | "Tipos soportados: ping, who." |
 | `INTERNAL_ERROR` | Fallo inesperado | "Reconecta; si persiste, revisa los logs del coordinador." |
 
-En los 4 primeros (`TOKEN_*`) el servidor envía el `error` y **a continuación** cierra con `4001 "invalid token"`.
+Al fallar la validación en el handshake (`upgrade`) o en un mensaje `verify`, el servidor envía el `error` correspondiente y **a continuación** cierra el socket: con `4001 "invalid token"` para `TOKEN_MISSING`, `TOKEN_MALFORMED`, `TOKEN_INVALID_SIGNATURE` o `TOKEN_MISMATCH`; y con `4003 "token expired"` para `TOKEN_EXPIRED` (coherente con la expiración en caliente de §3.6).
 
 **Códigos de cierre (close codes):**
 
@@ -226,6 +229,8 @@ Detalles obligatorios de implementación:
 ### 3.6 Expiración con el socket abierto **[Decisión]**
 
 El JWT solo se verifica al conectar, pero el PDF pide que el cliente reaccione cuando el token vence. Por eso, al aceptar la conexión el coordinador programa `setTimeout` hasta `payload.exp` y, al cumplirse, envía `error TOKEN_EXPIRED` y cierra con `4003`. El timer se cancela en `close`. Esto hace la demo del "token de 30 segundos" visible en vivo sin recargar.
+
+> **Nota sobre vigencia de tokens:** Un token ya emitido contiene su `exp` firmado digitalmente en el payload; modificar `JWT_EXPIRES_IN` en el `.env` solo afecta a los tokens emitidos en logins posteriores. Las sesiones ya abiertas conservan su tiempo de expiración original.
 
 ---
 
@@ -257,6 +262,8 @@ COORDINATOR_WS_URL=ws://localhost:5000
 ```
 
 > `JWT_SECRET` debe ser **idéntica** en auth y coordinador (error típico #2). El navegador no lee `.env`, así que `client/server.js` expone `GET /config.js` generado dinámicamente (`window.APP_CONFIG = { AUTH_URL, COORDINATOR_WS_URL }`) a partir de su `.env`.
+>
+> `JWT_EXPIRES_IN` en `auth-service/.env` se relee dinámicamente en cada petición `POST /login` (permite cambiar la duración en caliente sin reiniciar el proceso). Las demás variables (`PORT`, `JWT_SECRET`, `BCRYPT_ROUNDS`, `CORS_ORIGINS`) se cargan al iniciar el proceso y requieren reinicio del servicio para aplicar cambios.
 
 `.gitignore` mínimo: `node_modules/`, `*.db` (y `*.db-journal`, `*.db-wal`, `*.db-shm`), `.env`.
 
@@ -326,6 +333,7 @@ Cada fase termina con **criterios de aceptación verificables** y **al menos un 
    - `onmessage`: `players_update` → re-renderiza la lista "Jugadores en línea"; `connected` → confirma estado; `error` → muestra `message` + `hint`.
    - Botón **"Cerrar sesión"**: marca cierre intencional, borra el token, `ws.close(1000, 'logout')`, redirige a login.
    - `onclose` **inesperado** (flag de cierre intencional en `false`): muestra mensaje según el código (tabla 3.4) y vuelve a login (salvo `4002`).
+   - **Session watcher en cliente (`startSessionWatcher`):** sondeo cada ~300 ms comparando `localStorage.token` con el token activo + evento `storage` + latido secundario cada ~5 s enviando `{"type":"verify","token":"..."}` al coordinador. Si el token en `localStorage` cambia o se ensucia, envía `verify` y espera el veredicto del coordinador (o temporizador de seguridad de 2 s). Si el token fue eliminado (`null`), ejecuta cierre de sesión local inmediato con `ws.close(1000, "logout")` y mensaje. Se detiene al cerrar la sesión o recibir código `4002`.
 4. `common.js` (reutilizado): helpers compartidos (`API` para fetch con header `ngrok-skip-browser-warning`, lectura de config, manejo de token). `style.css` (reutilizado) para estilos.
 5. Escapar el `username` al renderizar (usar `textContent`, no `innerHTML`) para evitar XSS.
 
@@ -429,6 +437,11 @@ npm install -g wscat
 | 11 | Conectado: enviar `{"type":"x"}` | `error UNKNOWN_MESSAGE_TYPE` + `hint`. |
 | 12 | Conectar dos veces con el token de alice | La primera conexión recibe cierre `4002 session replaced`; la lista muestra a alice **una sola vez**. |
 | 13 | Conectar con `JWT_EXPIRES_IN=30s` y esperar | Al llegar `exp`: `error TOKEN_EXPIRED` y cierre `4003`; los demás reciben `players_update` sin ese usuario. |
+| 14 | Conectado: enviar `{"type":"verify","token":"<TOKEN_ALICE>"}` | `verified` con `expiresAt`. |
+| 15 | Conectado: enviar `{"type":"verify","token":"basura"}` | `error TOKEN_MALFORMED` y cierre `4001 invalid token`. |
+| 16 | Conectado: enviar `{"type":"verify"}` (sin token) | `error TOKEN_MISSING` y cierre `4001 invalid token`. |
+| 17 | Conectado: enviar token vencido | `error TOKEN_EXPIRED` y cierre `4003 token expired`. |
+| 18 | Conectado: enviar token válido de bob | `error TOKEN_MISMATCH` y cierre `4001 invalid token`. |
 
 Verificación cruzada desde Thunder Client: `GET {{COORD_URL}}/players` debe reflejar exactamente los usuarios conectados en cada momento.
 
