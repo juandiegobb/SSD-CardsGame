@@ -38,6 +38,12 @@
             let intentionalClose = false;
             let currentUserId = null;
             let socket;
+            let activeToken = token;
+            let lastVerifiedTokenCandidate = null;
+            let verifySecurityTimer = null;
+            let pollTimer = null;
+            let heartbeatTimer = null;
+            let lastErrorMessage = "";
 
             const currentUser = document.getElementById("current-user");
             const connectionStatus = document.getElementById("connection-status");
@@ -77,14 +83,91 @@
                 }
             }
 
+            function stopSessionWatcher() {
+                if (pollTimer) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                }
+                if (heartbeatTimer) {
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+                if (verifySecurityTimer) {
+                    clearTimeout(verifySecurityTimer);
+                    verifySecurityTimer = null;
+                }
+                window.removeEventListener("storage", handleStorageEvent);
+            }
+
             function returnToLogin(message) {
+                stopSessionWatcher();
                 clearCredentials();
                 sessionStorage.setItem("loginNotice", message);
                 window.location.replace("/login.html");
             }
 
+            function checkTokenStatus() {
+                if (intentionalClose) return;
+                const current = getToken();
+
+                // Token eliminado (null) -> cierre de sesión local inmediato
+                if (current === null) {
+                    stopSessionWatcher();
+                    intentionalClose = true;
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.close(1000, "logout");
+                    }
+                    returnToLogin("La sesión se cerró porque se eliminó el token.");
+                    return;
+                }
+
+                // Token modificado / ensuciado -> enviar verify de inmediato
+                if (current !== activeToken) {
+                    lastVerifiedTokenCandidate = current;
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(JSON.stringify({ type: "verify", token: current }));
+                        if (!verifySecurityTimer) {
+                            verifySecurityTimer = setTimeout(() => {
+                                returnToLogin("El coordinador no respondió a la verificación del token.");
+                            }, 2000);
+                        }
+                    } else if (socket && socket.readyState !== WebSocket.CONNECTING) {
+                        returnToLogin("Se perdió la conexión al intentar verificar el token.");
+                    }
+                }
+            }
+
+            function handleStorageEvent(event) {
+                if (event.key === "token" || event.key === null) {
+                    checkTokenStatus();
+                }
+            }
+
+            function startSessionWatcher(ws, initialToken) {
+                activeToken = initialToken;
+                stopSessionWatcher();
+
+                // Sondeo cada ~300 ms (mecanismo principal para cambios en DevTools)
+                pollTimer = setInterval(checkTokenStatus, 300);
+
+                // Latido secundario cada ~5 s como defensa adicional
+                heartbeatTimer = setInterval(() => {
+                    if (intentionalClose) return;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const cur = getToken();
+                        if (cur) {
+                            ws.send(JSON.stringify({ type: "verify", token: cur }));
+                        }
+                    }
+                }, 5000);
+
+                // Escucha de evento storage (cambios desde otras pestañas, p. ej. logout)
+                window.addEventListener("storage", handleStorageEvent);
+            }
+
             document.getElementById("logout-button").addEventListener("click", () => {
                 intentionalClose = true;
+                stopSessionWatcher();
                 clearCredentials();
                 if (socket) {
                     socket.close(1000, "logout");
@@ -104,6 +187,7 @@
 
                 socket.addEventListener("open", () => {
                     connectionStatus.textContent = "Conectado al coordinador.";
+                    startSessionWatcher(socket, token);
                 });
 
                 socket.addEventListener("message", (event) => {
@@ -126,7 +210,21 @@
                                 renderPlayers(msg.players);
                             }
                             break;
+                        case "verified":
+                            if (verifySecurityTimer) {
+                                clearTimeout(verifySecurityTimer);
+                                verifySecurityTimer = null;
+                            }
+                            if (lastVerifiedTokenCandidate) {
+                                activeToken = lastVerifiedTokenCandidate;
+                                lastVerifiedTokenCandidate = null;
+                            }
+                            break;
                         case "error":
+                            lastErrorMessage = msg.message;
+                            if (msg.code === "TOKEN_MISMATCH") {
+                                lastErrorMessage = "El token no corresponde a esta sesión.";
+                            }
                             showNotice(msg.message, msg.hint);
                             break;
                         case "pong":
@@ -135,6 +233,7 @@
                 });
 
                 socket.addEventListener("close", (event) => {
+                    stopSessionWatcher();
                     if (intentionalClose) {
                         return;
                     }
@@ -145,7 +244,7 @@
                         return;
                     }
                     if (event.code === 4001) {
-                        returnToLogin("Tu sesión no es válida o venció.");
+                        returnToLogin(lastErrorMessage || "Tu sesión no es válida o venció.");
                         return;
                     }
                     if (event.code === 4003) {
