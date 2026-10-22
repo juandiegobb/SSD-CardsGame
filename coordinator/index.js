@@ -3,7 +3,8 @@
 // un Map de jugadores en línea y hacer broadcast de la lista ante cada cambio.
 // Puerto por defecto: 5000. WebSocket en /connect?token=<JWT>.
 
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const http = require('node:http');
 const { URL } = require('node:url');
 const express = require('express');

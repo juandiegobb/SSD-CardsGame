@@ -2,9 +2,9 @@
 // Responsabilidad: Registro, Login con JWT (1h) y persistencia en SQLite propia.
 // Puerto por defecto: 4000
 
-require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const dotenv = require('dotenv');
 const express = require('express');
 const cors = require('cors');
