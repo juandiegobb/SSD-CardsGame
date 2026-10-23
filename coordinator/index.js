@@ -3,8 +3,10 @@
 // un Map de jugadores en línea y hacer broadcast de la lista ante cada cambio.
 // Puerto por defecto: 5000. WebSocket en /connect?token=<JWT>.
 
+const fs = require('node:fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+const dotenv = require('dotenv');
 const http = require('node:http');
 const { URL } = require('node:url');
 const express = require('express');
@@ -114,6 +116,34 @@ function classifyJwtError(err) {
   }
 
   return { code, message, hint };
+}
+
+// ── Helper para leer expiración dinámica configurada en .env en vivo ─────────
+function getLiveJwtExpiresInSeconds() {
+  try {
+    const authEnvPath = path.join(__dirname, '../auth-service/.env');
+    if (fs.existsSync(authEnvPath)) {
+      const parsed = dotenv.parse(fs.readFileSync(authEnvPath, 'utf8'));
+      if (parsed.JWT_EXPIRES_IN) {
+        let val = parsed.JWT_EXPIRES_IN.trim();
+        if (/^\d+$/.test(val)) return Number(val);
+        const match = val.match(/^(\d+)([smhdw]?)$/i);
+        if (match) {
+          const num = Number(match[1]);
+          const unit = (match[2] || 's').toLowerCase();
+          switch (unit) {
+            case 's': return num;
+            case 'm': return num * 60;
+            case 'h': return num * 3600;
+            case 'd': return num * 86400;
+            case 'w': return num * 604800;
+            default: return num;
+          }
+        }
+      }
+    }
+  } catch {}
+  return null;
 }
 
 const wss = new WebSocketServer({ noServer: true });
@@ -307,6 +337,23 @@ wss.on('connection', (ws, payload) => {
             hint: 'Cierra sesión e inicia con el mismo usuario.'
           });
           ws.close(4001, 'invalid token');
+          return;
+        }
+
+        // Validación de expiración activa en caliente (si maxAge fue indicado o el .env cambió)
+        const activeMaxAge = (typeof msg.maxAge === 'number' && msg.maxAge > 0)
+          ? msg.maxAge
+          : getLiveJwtExpiresInSeconds();
+
+        if (activeMaxAge && (Math.floor(Date.now() / 1000) - verifyPayload.iat) >= activeMaxAge) {
+          sendWs(ws, {
+            type: 'error',
+            ok: false,
+            code: 'TOKEN_EXPIRED',
+            message: 'Tu token de autenticación ha expirado.',
+            hint: 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.'
+          });
+          ws.close(4003, 'token expired');
           return;
         }
 

@@ -43,7 +43,9 @@
             let verifySecurityTimer = null;
             let pollTimer = null;
             let heartbeatTimer = null;
+            let activeExpirationTimer = null;
             let lastErrorMessage = "";
+            let tokenPayload = decodeToken(token);
 
             const currentUser = document.getElementById("current-user");
             const connectionStatus = document.getElementById("connection-status");
@@ -83,6 +85,72 @@
                 }
             }
 
+            function decodeToken(tok) {
+                try {
+                    const parts = tok.split('.');
+                    if (parts.length < 2) return null;
+                    const base64Url = parts[1];
+                    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                    const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                    }).join(''));
+                    return JSON.parse(jsonPayload);
+                } catch {
+                    return null;
+                }
+            }
+
+            function parseDurationToSeconds(val) {
+                if (!val) return 3600;
+                if (typeof val === 'number') return val;
+                val = String(val).trim();
+                if (/^\d+$/.test(val)) return Number(val);
+                const match = val.match(/^(\d+)([smhdw]?)$/i);
+                if (!match) return 3600;
+                const num = Number(match[1]);
+                const unit = (match[2] || 's').toLowerCase();
+                switch (unit) {
+                    case 's': return num;
+                    case 'm': return num * 60;
+                    case 'h': return num * 3600;
+                    case 'd': return num * 86400;
+                    case 'w': return num * 604800;
+                    default: return num;
+                }
+            }
+
+            async function checkActiveExpiration() {
+                if (intentionalClose) return;
+                try {
+                    const { AUTH_URL } = getAppConfig();
+                    const res = await fetch(`${AUTH_URL}/health`, {
+                        headers: { 'ngrok-skip-browser-warning': 'true' }
+                    });
+                    const data = await res.json();
+                    if (data && data.jwtExpiresIn) {
+                        const allowedSeconds = parseDurationToSeconds(data.jwtExpiresIn);
+                        const payload = tokenPayload || decodeToken(getToken());
+                        if (payload && payload.iat && allowedSeconds > 0) {
+                            const elapsedSeconds = Math.floor(Date.now() / 1000) - payload.iat;
+                            if (elapsedSeconds >= allowedSeconds) {
+                                if (socket && socket.readyState === WebSocket.OPEN) {
+                                    socket.send(JSON.stringify({
+                                        type: 'verify',
+                                        token: getToken(),
+                                        maxAge: allowedSeconds
+                                    }));
+                                }
+                                setTimeout(() => {
+                                    returnToLogin("Tu sesión expiró.");
+                                }, 800);
+                            }
+                        }
+                    }
+                } catch {
+                    // Fallo transitorio de red no interrumpe el watcher
+                }
+            }
+
             function stopSessionWatcher() {
                 if (pollTimer) {
                     clearInterval(pollTimer);
@@ -91,6 +159,10 @@
                 if (heartbeatTimer) {
                     clearInterval(heartbeatTimer);
                     heartbeatTimer = null;
+                }
+                if (activeExpirationTimer) {
+                    clearInterval(activeExpirationTimer);
+                    activeExpirationTimer = null;
                 }
                 if (verifySecurityTimer) {
                     clearTimeout(verifySecurityTimer);
@@ -160,6 +232,9 @@
                         }
                     }
                 }, 5000);
+
+                // Comprobación activa de expiración del .env cada 1.5 s para sesiones ya abiertas
+                activeExpirationTimer = setInterval(checkActiveExpiration, 1500);
 
                 // Escucha de evento storage (cambios desde otras pestañas, p. ej. logout)
                 window.addEventListener("storage", handleStorageEvent);
