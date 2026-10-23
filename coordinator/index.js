@@ -340,7 +340,19 @@ wss.on('connection', (ws, payload) => {
           return;
         }
 
-        // Validación de expiración activa en caliente (si maxAge fue indicado o el .env cambió)
+        // Validación de expiración activa en caliente
+        if (msg.forceExpired === true) {
+          sendWs(ws, {
+            type: 'error',
+            ok: false,
+            code: 'TOKEN_EXPIRED',
+            message: 'Tu token de autenticación ha expirado.',
+            hint: 'Inicia sesión de nuevo en POST /login para obtener un token nuevo.'
+          });
+          ws.close(4003, 'token expired');
+          return;
+        }
+
         const activeMaxAge = (typeof msg.maxAge === 'number' && msg.maxAge > 0)
           ? msg.maxAge
           : getLiveJwtExpiresInSeconds();

@@ -46,6 +46,8 @@
             let activeExpirationTimer = null;
             let lastErrorMessage = "";
             let tokenPayload = decodeToken(token);
+            let lastKnownExpiresIn = null;
+            let policyChangeTimestamp = null;
 
             const currentUser = document.getElementById("current-user");
             const connectionStatus = document.getElementById("connection-status");
@@ -128,21 +130,33 @@
                     });
                     const data = await res.json();
                     if (data && data.jwtExpiresIn) {
-                        const allowedSeconds = parseDurationToSeconds(data.jwtExpiresIn);
-                        const payload = tokenPayload || decodeToken(getToken());
-                        if (payload && payload.iat && allowedSeconds > 0) {
-                            const elapsedSeconds = Math.floor(Date.now() / 1000) - payload.iat;
-                            if (elapsedSeconds >= allowedSeconds) {
+                        const currentExpiresStr = String(data.jwtExpiresIn).trim();
+                        const allowedSeconds = parseDurationToSeconds(currentExpiresStr);
+
+                        // Inicializar el valor al momento de entrar al lobby
+                        if (lastKnownExpiresIn === null) {
+                            lastKnownExpiresIn = currentExpiresStr;
+                        } else if (lastKnownExpiresIn !== currentExpiresStr) {
+                            // Se detectó cambio en .env: reiniciar cronómetro desde cero a partir de este momento
+                            lastKnownExpiresIn = currentExpiresStr;
+                            policyChangeTimestamp = Math.floor(Date.now() / 1000);
+                            console.log(`[Lobby] Cambio en .env detectado: ${currentExpiresStr}. Conteo de ${allowedSeconds}s iniciado desde ahora.`);
+                        }
+
+                        // Si hubo cambio a una política en caliente, esperar que transcurra el nuevo tiempo desde el cambio
+                        if (policyChangeTimestamp !== null && allowedSeconds > 0) {
+                            const secondsSinceChange = Math.floor(Date.now() / 1000) - policyChangeTimestamp;
+                            if (secondsSinceChange >= allowedSeconds) {
                                 if (socket && socket.readyState === WebSocket.OPEN) {
                                     socket.send(JSON.stringify({
                                         type: 'verify',
                                         token: getToken(),
-                                        maxAge: allowedSeconds
+                                        forceExpired: true
                                     }));
                                 }
                                 setTimeout(() => {
                                     returnToLogin("Tu sesión expiró.");
-                                }, 800);
+                                }, 600);
                             }
                         }
                     }
